@@ -16,6 +16,9 @@ dependencies = [
 [project.scripts]
 amber = "backend.app.main:cli"
 
+[tool.setuptools.packages.find]
+include = ["backend*"]
+
 [build-system]
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
