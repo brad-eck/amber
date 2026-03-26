@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.config import load_config
 from backend.app.models import init_db
+from backend.app.routes import router as entries_router
 from backend.app.storage import ensure_directories
 
 
@@ -43,6 +44,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+app.include_router(entries_router)
 
 
 @app.get("/health")

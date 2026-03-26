@@ -21,3 +21,6 @@ frontend/build/
 
 # OS
 .DS_Store
+
+# Context
+CONTEXT.md
