@@ -5,11 +5,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build and run
 
 ```bash
+# Backend
 pip install .          # install dependencies
 amber                  # start the server (127.0.0.1:8765, auto-reload enabled)
+
+# Frontend (separate terminal)
+cd frontend
+npm install
+npm run dev            # SvelteKit dev server (default http://localhost:5173)
 ```
 
-Requires Python 3.10+ and FFmpeg/ffprobe on PATH.
+Requires Python 3.10+, FFmpeg/ffprobe on PATH, and Node.js 18+.
+
+The frontend dev server proxies `/api` requests to the backend at `http://127.0.0.1:8765`.
 
 ## Architecture
 
@@ -37,13 +45,15 @@ main.py ─── config.py        (loads TOML config, creates defaults on first
 
 ## API endpoints
 
+All API routes are prefixed with `/api`. The frontend proxies `/api` to the backend in dev mode.
+
 ```
-GET  /health
-GET  /entries
-GET  /entries/{date}
-GET  /entries/{date}/video
-POST /entries/{date}/video        (file upload, triggers background transcription)
-POST /entries/{date}/transcribe   (manual retry/re-transcribe)
+GET  /api/health
+GET  /api/entries
+GET  /api/entries/{date}
+GET  /api/entries/{date}/video
+POST /api/entries/{date}/video        (file upload, triggers background transcription)
+POST /api/entries/{date}/transcribe   (manual retry/re-transcribe)
 ```
 
 ## On-disk data layout
