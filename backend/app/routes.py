@@ -6,11 +6,13 @@ import datetime
 import json
 import subprocess
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, Request, UploadFile
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from backend.app.models import get_db
 from backend.app.storage import ensure_entry_dir
+from backend.app.transcribe import process_entry
 
 router = APIRouter(prefix="/entries", tags=["entries"])
 
@@ -65,11 +67,37 @@ def _write_metadata(
     (entry_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
 
 
+def _start_transcription(
+    background_tasks: BackgroundTasks,
+    request: Request,
+    date: str,
+) -> None:
+    """Schedule transcription as a background task."""
+    data_path: Path = request.app.state.data_path
+    db_path: Path = request.app.state.db_path
+    cfg = request.app.state.config
+
+    background_tasks.add_task(
+        process_entry,
+        data_path=data_path,
+        db_path=db_path,
+        date=date,
+        whisper_model=cfg.transcription.whisper_model,
+        language=cfg.transcription.language,
+    )
+
+
 @router.post("/{date}/video", status_code=201)
-async def upload_video(date: str, file: UploadFile, request: Request):
+async def upload_video(
+    date: str,
+    file: UploadFile,
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
     """Upload a video file for a given date.
 
     If an entry already exists for that date, it is replaced.
+    Transcription is automatically kicked off in the background.
     """
     entry_date = _parse_date(date)
     data_path: Path = request.app.state.data_path
@@ -122,11 +150,61 @@ async def upload_video(date: str, file: UploadFile, request: Request):
             ),
         )
 
+    # Kick off transcription in the background
+    _start_transcription(background_tasks, request, entry_date.isoformat())
+
     return {
         "date": entry_date.isoformat(),
         "duration_seconds": duration,
         "file_size_bytes": file_size,
         "transcription_status": "pending",
+    }
+
+
+@router.post("/{date}/transcribe", status_code=202)
+async def trigger_transcription(
+    date: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """Manually trigger transcription for an entry.
+
+    Useful for retrying after a failure or re-transcribing with
+    updated settings. Returns 202 Accepted immediately; transcription
+    runs in the background.
+    """
+    entry_date = _parse_date(date)
+    db_path: Path = request.app.state.db_path
+
+    with get_db(db_path) as conn:
+        row = conn.execute(
+            "SELECT date, transcription_status FROM entries WHERE date = ?",
+            (entry_date.isoformat(),),
+        ).fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No entry for {entry_date.isoformat()}")
+
+    if row["transcription_status"] == "processing":
+        raise HTTPException(
+            status_code=409,
+            detail="Transcription is already in progress for this entry.",
+        )
+
+    # Reset status to pending before kicking off
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with get_db(db_path) as conn:
+        conn.execute(
+            "UPDATE entries SET transcription_status = 'pending', updated_at = ? WHERE date = ?",
+            (now, entry_date.isoformat()),
+        )
+
+    _start_transcription(background_tasks, request, entry_date.isoformat())
+
+    return {
+        "date": entry_date.isoformat(),
+        "transcription_status": "pending",
+        "message": "Transcription started.",
     }
 
 
@@ -157,9 +235,10 @@ async def list_entries(request: Request):
 
 @router.get("/{date}")
 async def get_entry(date: str, request: Request):
-    """Get a single entry's metadata."""
+    """Get a single entry's metadata, including transcript if available."""
     entry_date = _parse_date(date)
     db_path: Path = request.app.state.db_path
+    data_path: Path = request.app.state.data_path
 
     with get_db(db_path) as conn:
         row = conn.execute(
@@ -175,7 +254,27 @@ async def get_entry(date: str, request: Request):
     if row is None:
         raise HTTPException(status_code=404, detail=f"No entry for {entry_date.isoformat()}")
 
-    return dict(row)
+    result = dict(row)
+
+    # Include structured transcript data if the JSON sidecar exists
+    entry_dir = (
+        data_path / "logs"
+        / f"{entry_date.year:04d}"
+        / f"{entry_date.month:02d}"
+        / entry_date.isoformat()
+    )
+    transcript_json_path = entry_dir / "transcript.json"
+    if transcript_json_path.is_file():
+        try:
+            result["transcript_segments"] = json.loads(
+                transcript_json_path.read_text(encoding="utf-8")
+            )
+        except (json.JSONDecodeError, OSError):
+            result["transcript_segments"] = None
+    else:
+        result["transcript_segments"] = None
+
+    return result
 
 
 @router.get("/{date}/video")
